@@ -1,0 +1,3 @@
+C:/Users/mesas/OneDrive - Pontificia Universidad Javeriana/Desktop/Reloj Tesis/cmake-build-debug/CMakeFiles/Reloj_Tesis.dir
+C:/Users/mesas/OneDrive - Pontificia Universidad Javeriana/Desktop/Reloj Tesis/cmake-build-debug/CMakeFiles/edit_cache.dir
+C:/Users/mesas/OneDrive - Pontificia Universidad Javeriana/Desktop/Reloj Tesis/cmake-build-debug/CMakeFiles/rebuild_cache.dir
