@@ -6,6 +6,7 @@
 #include <Adafruit_GC9A01A.h>
 #include <Adafruit_GFX.h>
 #include <time.h>
+#include "esp_sleep.h"
 
 //---------------------------------WIFI-----------------------------------------------------------------------------------
 const char* ssid = "SM-DESKTOP";//"SMN"; //"SLB";
@@ -42,8 +43,9 @@ RTC_DS3231 rtc;
 #define TFT_DC     12
 //---------------------------------suspension de pantalla-------------------------------------------------------------------------
 #define PIN_LED 9 // Asumiendo que el PIN_LED es el IO9 pin que controla el display
-#define BTN3 13 // El pin donde se conecta el botón BTN3 encender pantalla
 #define BTN2 10 // El pin donde se conecta el botón BTN2 alerta
+#define BTN3 13 // El pin donde se conecta el botón BTN3 encender pantalla
+
 bool pantallaEncendida = false;
 unsigned long tiempoPantallaEncendida = 0;
 const unsigned long tiempoEncendido = 15000; // 15 segundos en milisegundos
@@ -66,6 +68,8 @@ void setup() {
   //pruebas
   analogReadResolution(ADC_RESOLUTION);
   analogSetPinAttenuation(BATTERY_PIN, ADC_ATTENUATION);//
+  
+  
 
   pinMode(BTN2, INPUT);  // Configura BTN2 como entrada
   pinMode(BTN3, INPUT);
@@ -448,7 +452,6 @@ void enviarAlertaUsuario() {
 
 
 
-
 void loop() {
   // Mantener la conexión MQTT
   if (!client.connected()) {
@@ -469,16 +472,15 @@ void loop() {
   // Mostrar la hora y el estado de conexión constantemente
   mostrarFechaHora();
 
-
+  //calcula el nivel de bateria y lo manda a tb
   enviarNivelBateriaAThingsBoard();
 
+  //mira si el usuario necesita mandar una alerta urgente
   manejarAlertaBoton2();
 
+  //mira si el usuario quiere prender la pantalla
   manejarPantalla();
 
   delay(1000);
-
   
 }
-
-
