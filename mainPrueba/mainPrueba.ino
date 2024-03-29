@@ -31,31 +31,70 @@ float porcentajeBateria = 0; // Almacena el porcentaje de batería
 //---------------------------------Configuración que mida met cada minuto------------------------------------------------
 unsigned long lastActivityTime = 0; // Guarda la última vez que se ejecutó la función
 const long interval = 60000; // Intervalo de tiempo (60 segundos o 60000 milisegundos)
+//---------------------------------BATERIA-------------------------------------------------------------------------
+#define BATTERY_PIN 25 // Cambia esto por el pin correcto conectado a B_MON
+#define ADC_RESOLUTION 12 // Resolución del ADC de 12 bits
+#define ADC_ATTENUATION ADC_0db // Atenuación de 0 dB
 //---------------------------------RTC & DISPLAY-------------------------------------------------------------------------
 RTC_DS3231 rtc;
 #define TFT_CS     5
 #define TFT_RST    33
 #define TFT_DC     12
 //---------------------------------suspension de pantalla-------------------------------------------------------------------------
-#define PIN_LED 9 // Asumiendo que el PIN_LED es el IO2
-#define BTN3 13 // El pin donde se conecta el botón BTN2
+#define PIN_LED 9 // Asumiendo que el PIN_LED es el IO9 pin que controla el display
+#define BTN3 13 // El pin donde se conecta el botón BTN3 encender pantalla
+#define BTN2 10 // El pin donde se conecta el botón BTN2 alerta
 bool pantallaEncendida = false;
 unsigned long tiempoPantallaEncendida = 0;
 const unsigned long tiempoEncendido = 15000; // 15 segundos en milisegundos
-bool necesitaApagarPantalla = false;
 
 
 Adafruit_GC9A01A tft = Adafruit_GC9A01A(TFT_CS, TFT_DC, TFT_RST);
 
 // Nuevas variables para el manejo de promedios para transmitir cada 30 min
-float sumMETs = 0;
-int contadorSegundos = 0, contadorMinutos = 0, contador10Minutos = 0;
-float promedioMETs30Min[3] = {0, 0, 0};
-int indice30Min = 0;
+int contadorMinutos = 0;
 float METsPorPeriodo[3] = {0, 0, 0}; // Almacena los METs de cada periodo de 10 minutos
 int periodoActual = 0; // Indica el periodo actual de 10 minutos dentro de los 30 minutos
 bool banderaActividad = false; // Indica si en algún periodo se superó el umbral de 1.5 METs
 
+
+//---------------------------FUNCIONES------------------------------
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  //pruebas
+  analogReadResolution(ADC_RESOLUTION);
+  analogSetPinAttenuation(BATTERY_PIN, ADC_ATTENUATION);//
+
+  pinMode(BTN2, INPUT);  // Configura BTN2 como entrada
+  pinMode(BTN3, INPUT);
+  pinMode(PIN_LED, OUTPUT); // Configura PIN_LED como salida
+  digitalWrite(PIN_LED, LOW); // Asegúrate de que la pantalla comience apagada
+
+  if (!rtc.begin()) {
+    Serial.println("No se encontró el RTC");
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    Serial.println("RTC perdió energía, se establece la fecha y hora actuales");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  tft.begin();
+  tft.setRotation(0);
+  tft.fillScreen(GC9A01A_BLACK);
+
+  if (accelerometer.beginI2C(i2cAddress) != BMA400_OK) {
+    Serial.println("Error: BMA400 not connected, check wiring and I2C address!");
+    delay(1000);
+  }
+  Serial.println("BMA400 connected!");
+
+  setup_wifi(); // Connect to WiFi and sync time
+  client.setServer(mqtt_server, 1883);
+}
 
 
 void syncNTPTime() {
@@ -79,7 +118,6 @@ void syncNTPTime() {
     Serial.println("La nueva hora del RTC no es válida, ajuste no realizado.");
   }
 }
-
 
 
 //Funcion para la conexion wifi
@@ -116,12 +154,11 @@ void reconnect() {
 
 
 //Funcion para enviar los datos
-//Funcion para enviar los datos
 void enviarDatos(float MET, int periodo, bool finalizarCiclo) {
     DateTime now = rtc.now(); // Obtener la hora actual del RTC
     String timestamp = String(now.year(), DEC) + "-" + 
                        String(now.month(), DEC) + "-" + 
-                       String(now.day(), DEC) + " T" + 
+                       String(now.day(), DEC) + " T-> " + 
                        String(now.hour(), DEC) + ":" + 
                        String(now.minute(), DEC) + ":" + 
                        String(now.second(), DEC);
@@ -160,32 +197,62 @@ void enviarDatos(float MET, int periodo, bool finalizarCiclo) {
 }
 
 
-
-
-//Funcion para medir el nivel de la bateria 
-void medirNivelBateria() {
-  // Definir los voltajes máximo y mínimo de la batería
-  const float voltajeMaximo = 4.15; // Ajustar al voltaje máximo de tu batería
-  const float voltajeMinimo = 3.3; // Ajustar al voltaje mínimo de tu batería
-  
-  uint32_t Vbatt = 0;
-  for(int i = 0; i < 16; i++) {
-    Vbatt += analogRead(25); // Asumiendo A18 es tu pin de lectura de batería
-  }
-  float Vbattf = (Vbatt / 16.0) * (3.3 / 4095.0) * 2; // Ajusta esta fórmula según tu circuito
-
-  // Calcular el porcentaje de batería basado en los voltajes máximo y mínimo
-  float porcentajeBateria = (Vbattf - voltajeMinimo) / (voltajeMaximo - voltajeMinimo) * 100;
-  porcentajeBateria = constrain(porcentajeBateria, 0, 100); // Asegura que el porcentaje esté entre 0 y 100
-
-  // Actualiza la pantalla TFT con el porcentaje de batería
-  tft.setCursor(70, 50); // Ajusta la posición según sea necesario
-  tft.setTextSize(2);
-  tft.setTextColor(GC9A01A_WHITE);
-  tft.print("Bateria: ");
-  tft.print(porcentajeBateria, 0);
-  tft.println("%");
+float calculateBatteryPercentage(float voltage) {
+  const float maxVolt = 0.22; // Voltaje correspondiente al 100% de carga
+  const float minVolt = 0.14; // Voltaje correspondiente al 1% de carga
+  return (voltage - minVolt) / (maxVolt - minVolt) * 100;
 }
+
+
+//Función para medir el nivel de la batería y enviarlo a ThingsBoard cada minuto
+void enviarNivelBateriaAThingsBoard() {
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - lastBatteryReadMillis >= batteryReadInterval) {
+    lastBatteryReadMillis = currentMillis; // Actualiza la última vez que se leyó la batería
+
+    // Configurar la resolución del ADC y la atenuación
+    analogReadResolution(12); // 12 bits de resolución
+    analogSetAttenuation(ADC_0db); // Atenuación de 0 dB
+
+    uint32_t adcValue = 0;
+    for (int i = 0; i < 16; i++) {
+      adcValue += analogRead(BATTERY_PIN); // Asegúrate de que BATTERY_PIN es el pin correcto
+    }
+    adcValue /= 16; // Promedio de las lecturas para reducir el ruido
+
+    // Convertir el valor del ADC a voltaje para B_MON
+    float voltageBMON = (float)adcValue * (1.1 / 4095.0); // Convierte el valor del ADC a voltaje en B_MON
+
+    // Mapear el voltaje de B_MON al rango de voltaje de la batería
+    float voltajeBateria = mapf(voltageBMON, 0.14, 0.20, 3.0, 4.2);
+
+    // Calcular el porcentaje de batería
+    float porcentajeBateria = mapf(voltageBMON, 0.14, 0.20, 1, 100);
+
+    // Preparar el payload JSON para enviar
+    String payload = "{\"BMON\": " + String(voltageBMON, 2) + ", \"voltajeBateria\": " + String(voltajeBateria, 2) + ", \"porcentajeBateria\": " + String(porcentajeBateria) + "}";
+
+    // Imprimir en el puerto serie y enviar a ThingsBoard
+    Serial.print("BMON: "); Serial.print(voltageBMON, 2); Serial.print("V ");
+    Serial.print("Voltaje Batería: "); Serial.print(voltajeBateria, 2); Serial.print("V ");
+    Serial.print("Porcentaje Batería: "); Serial.print(porcentajeBateria); Serial.println("%");
+    
+    if (client.publish("v1/devices/me/telemetry", (char*)payload.c_str())) {
+      Serial.println("Datos enviados a ThingsBoard: " + payload);
+    } else {
+      Serial.println("Error al enviar datos a ThingsBoard.");
+    }
+  }
+}
+
+// Función para mapear un float a otro rango
+float mapf(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+
+
 
 
 //Funcion para medir y clasificar la actividad
@@ -238,40 +305,6 @@ void medirYClasificarActividad() {
 }
 
 
-
-void setup() {
-  Serial.begin(115200);
-  Wire.begin();
-
-  pinMode(BTN3, INPUT);
-  pinMode(PIN_LED, OUTPUT); // Configura PIN_LED como salida
-  digitalWrite(PIN_LED, LOW); // Asegúrate de que la pantalla comience apagada
-
-  if (!rtc.begin()) {
-    Serial.println("No se encontró el RTC");
-    while (1);
-  }
-
-  if (rtc.lostPower()) {
-    Serial.println("RTC perdió energía, se establece la fecha y hora actuales");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
-  tft.begin();
-  tft.setRotation(0);
-  tft.fillScreen(GC9A01A_BLACK);
-
-  if (accelerometer.beginI2C(i2cAddress) != BMA400_OK) {
-    Serial.println("Error: BMA400 not connected, check wiring and I2C address!");
-    delay(1000);
-  }
-  Serial.println("BMA400 connected!");
-
-  setup_wifi(); // Connect to WiFi and sync time
-  client.setServer(mqtt_server, 1883);
-}
-
-
 void mostrarFechaHora() {
   DateTime now = rtc.now();
 
@@ -314,41 +347,12 @@ void mostrarFechaHora() {
 }
 
 
-//Función para medir el nivel de la batería y enviarlo a ThingsBoard cada minuto
-void enviarNivelBateriaAThingsBoard() {
-  unsigned long currentMillis = millis();
-  
-  if (currentMillis - lastBatteryReadMillis >= batteryReadInterval) {
-    lastBatteryReadMillis = currentMillis; // Actualiza la última vez que se leyó la batería
-
-    uint32_t Vbatt = 0;
-    for (int i = 0; i < 16; i++) {
-      Vbatt += analogReadMilliVolts(25);
-    }
-    float Vbattf = Vbatt * 21.0 / 16 / 1000.0; // Conversión a voltios
-
-    // Asumiendo un rango operativo de 3.0V (min) a 4.2V (max)
-    float voltajeMinimo = 3.0;
-    float voltajeMaximo = 4.2;
-    porcentajeBateria = (Vbattf - voltajeMinimo) / (voltajeMaximo - voltajeMinimo) * 100;
-    porcentajeBateria = constrain(porcentajeBateria, 1, 100); // Asegurar que esté entre 1 y 100
-
-    String payload = "{\"voltajeBateria\": " + String(Vbattf, 3) + "}";
-    
-    if (client.publish("v1/devices/me/telemetry", (char*)payload.c_str())) {
-      Serial.println("Nivel de batería enviado a ThingsBoard: " + String(Vbattf, 3) + "V");
-    } else {
-      Serial.println("Error al enviar el nivel de batería a ThingsBoard.");
-    }
-  }
-}
-
-
 void encenderPantalla() {
   digitalWrite(PIN_LED, HIGH); // Enciende la retroiluminación
   pantallaEncendida = true;
   tiempoPantallaEncendida = millis(); // Guarda el momento en que se encendió
 }
+
 
 void apagarPantalla() {
   digitalWrite(PIN_LED, LOW); // Apaga la retroiluminación
@@ -368,6 +372,78 @@ void manejarPantalla() {
     apagarPantalla();
   }
 }
+
+
+void manejarAlertaBoton2() {
+  static unsigned long buttonPressedTime = 0;
+  static bool buttonHeld = false;
+  
+  // Verificar si el botón está presionado
+  if (digitalRead(BTN2) == HIGH) {
+    if (!buttonHeld) {
+      // Inicia el seguimiento del tiempo si no se ha presionado antes
+      buttonPressedTime = millis();
+      buttonHeld = true;
+    }
+    
+    // Comprueba si el botón se ha mantenido presionado el tiempo suficiente para enviar la alerta
+    if (millis() - buttonPressedTime > 6000) { //6000, dejarlo presionado 1 segundo
+      enviarAlertaUsuario();
+      buttonHeld = false; // Resetea el estado para evitar múltiples alertas
+    }
+  } else {
+    buttonHeld = false; // Resetea si el botón se ha soltado
+  }
+}
+
+
+void enviarAlertaUsuario() {
+  String payload = "{\"ALERTA USUARIO\": 1}";
+  if (client.publish(topic, (char*)payload.c_str())) {
+    Serial.println("Alerta de usuario enviada a ThingsBoard");
+    digitalWrite(PIN_LED, HIGH);
+
+    // Cambiar colores de la pantalla
+    tft.fillScreen(GC9A01A_RED); // Cambiar el fondo a rojo
+    tft.setTextColor(GC9A01A_BLACK); // Cambiar el color del texto a negro
+    tft.setTextSize(4); // Aumentar el tamaño del texto para hacerlo más grande
+
+    // Calcular la posición del texto para "ALERTA" y centrarlo
+    String alertMsg = "ALERTA";
+    int16_t x1, y1;
+    uint16_t width, height;
+    tft.getTextBounds(alertMsg, 0, 0, &x1, &y1, &width, &height);
+    tft.setCursor((tft.width() - width) / 2, (tft.height() / 2) - height);
+
+    // Mostrar "ALERTA"
+    tft.println(alertMsg);
+
+    // Calcular la posición del texto para "ENVIADA" y centrarlo debajo de "ALERTA"
+    String sentMsg = "ENVIADA";
+    tft.getTextBounds(sentMsg, 0, 0, &x1, &y1, &width, &height);
+    tft.setCursor((tft.width() - width) / 2, (tft.height() / 2) + (height / 2)); // Ajustar el interlineado aquí
+
+    // Mostrar "ENVIADA"
+    tft.println(sentMsg);
+
+    // Esperar 5 segundos con el mensaje en pantalla
+    unsigned long alertTime = millis();
+    while(millis() - alertTime < 5000) {
+      // Mantiene la actualización de MQTT mientras muestra el mensaje
+      if (!client.connected()) {
+        reconnect();
+      }
+      client.loop();
+    }
+
+    // Restaurar la visualización previa después de 5 segundos
+    tft.fillScreen(GC9A01A_BLACK); // Cambiar el fondo a negro
+    digitalWrite(PIN_LED, LOW);
+  } else {
+    Serial.println("Error al enviar la alerta de usuario");
+  }
+}
+
 
 
 
@@ -393,7 +469,10 @@ void loop() {
   // Mostrar la hora y el estado de conexión constantemente
   mostrarFechaHora();
 
+
   enviarNivelBateriaAThingsBoard();
+
+  manejarAlertaBoton2();
 
   manejarPantalla();
 
