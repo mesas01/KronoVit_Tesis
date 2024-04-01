@@ -9,7 +9,7 @@
 #include "esp_sleep.h"
 
 //---------------------------------WIFI-----------------------------------------------------------------------------------
-const char* ssid = "SM-DESKTOP";//"SMN"; //"SLB";
+const char* ssid = "SM-DESKTOP"; //"SMN"; //"SLB";
 const char* password = "12345678";//"speedemon";//"12345678";
 //------------------------------------THINGSBOARD--------------------------------------------------------------------------
 const char* mqtt_server = "demo.thingsboard.io";
@@ -57,6 +57,7 @@ Adafruit_GC9A01A tft = Adafruit_GC9A01A(TFT_CS, TFT_DC, TFT_RST);
 int contadorMinutos = 0;
 float METsPorPeriodo[3] = {0, 0, 0}; // Almacena los METs de cada periodo de 10 minutos
 int periodoActual = 0; // Indica el periodo actual de 10 minutos dentro de los 30 minutos
+bool actividadSedentaria = true;// Indica si en algún periodo se superó el umbral de 1.5 METs
 bool banderaActividad = false; // Indica si en algún periodo se superó el umbral de 1.5 METs
 
 
@@ -158,47 +159,54 @@ void reconnect() {
 
 
 //Funcion para enviar los datos
+
+// Función para enviar los datos
 void enviarDatos(float MET, int periodo, bool finalizarCiclo) {
     DateTime now = rtc.now(); // Obtener la hora actual del RTC
-    String timestamp = String(now.year(), DEC) + "-" + 
-                       String(now.month(), DEC) + "-" + 
-                       String(now.day(), DEC) + " T-> " + 
-                       String(now.hour(), DEC) + ":" + 
-                       String(now.minute(), DEC) + ":" + 
+    String timestamp = String(now.year(), DEC) + "-" +
+                       String(now.month(), DEC) + "-" +
+                       String(now.day(), DEC) + " T-> " +
+                       String(now.hour(), DEC) + ":" +
+                       String(now.minute(), DEC) + ":" +
                        String(now.second(), DEC);
 
-    String payload;
     if (!finalizarCiclo) {
         // Enviar MET de un periodo específico junto con la hora
-        payload = "{\"METsPeriodo" + String(periodo + 1) + "\": " + String(MET, 2) + ", \"timestamp\": \"" + timestamp + "\"}";
+        String payload = "{\"METsPeriodo" + String(periodo + 1) + "\": " + String(MET, 2) + ", \"timestamp\": \"" + timestamp + "\"}";
+        if (client.publish(topic, (char*)payload.c_str())) {
+            Serial.println("Datos enviados exitosamente: " + payload);
+        } else {
+            Serial.println("Error al enviar datos");
+        }
     } else {
-        // Comprobar si todos los periodos están debajo de 1.5
-        bool todosDebajo = true;
-        for (int i = 0; i < 3; i++) {
-            if (METsPorPeriodo[i] > 1.5) {
-                todosDebajo = true;//cambiar a false para su funcionamiento correcto;
-                break;
+        // En el final del ciclo, evaluar si la actividad sedentaria es verdadera
+        if (actividadSedentaria) {
+            // Si es actividad sedentaria, enviar el MET como 1.4 y también el MET del periodo 3
+            String payloadSedentario = "{\"MET\": \"1.4\", \"timestamp\": \"" + timestamp + "\"}";
+            if (client.publish(topic, (char*)payloadSedentario.c_str())) {
+                Serial.println("Datos enviados exitosamente: " + payloadSedentario);
+            } else {
+                Serial.println("Error al enviar datos de actividad sedentaria");
             }
         }
-        
-        if (todosDebajo) {
-            payload = "{\"MET\": \"1.4\", \"timestamp\": \"" + timestamp + "\"}";
+
+        // Enviar siempre el MET del periodo 3 al finalizar el ciclo
+        String payloadPeriodo = "{\"METsPeriodo3\": " + String(METsPorPeriodo[2], 2) + ", \"timestamp\": \"" + timestamp + "\"}";
+        if (client.publish(topic, (char*)payloadPeriodo.c_str())) {
+            Serial.println("Datos enviados exitosamente: " + payloadPeriodo);
         } else {
-            // Si no, enviar la bandera de actividad normalmente
-            payload = "{\"BanderaActividad\": " + String(todosDebajo ? "true" : "false") + ", \"timestamp\": \"" + timestamp + "\"}";
+            Serial.println("Error al enviar datos del periodo 3");
         }
         
         // Resetear para el próximo ciclo de 30 minutos
-        for (int i = 0; i < 3; i++) METsPorPeriodo[i] = 0;
+        for (int i = 0; i < 3; i++){
+          METsPorPeriodo[i] = 0;
+        } 
         periodoActual = 0;
-    }
-
-    if (client.publish(topic, (char*)payload.c_str())) {
-        Serial.println("Datos enviados exitosamente: " + payload);
-    } else {
-        Serial.println("Error al enviar datos");
+        actividadSedentaria = true; // Resetear el estado de actividad sedentaria para el nuevo ciclo
     }
 }
+
 
 
 float calculateBatteryPercentage(float voltage) {
@@ -289,19 +297,18 @@ void medirYClasificarActividad() {
         enviarDatos(promedioMETs, periodoActual, false); // false porque no es el final del ciclo de 30 minutos
 
         // Preparar para el próximo periodo
-        periodoActual = (periodoActual + 1) % 3; // Rotar entre 0, 1, y 2 para los periodos de 30 minutos
-        if (periodoActual == 0) { // Después de completar los tres periodos de 10 minutos
-            // Evaluar si se activa la bandera de actividad sedentaria
-            bool actividadSedentaria = false;
-            for (int i = 0; i < 3; i++) {
-                if (METsPorPeriodo[i] > 1.5) {
-                    actividadSedentaria = false;//cambiar a true para pruebas reales
-                    break;
-                }
+        periodoActual = periodoActual++;
+        if (periodoActual == 3) { // Después de completar los tres periodos de 10 minutos
+          periodoActual = 0;
+          for (int i = 0; i < 3; i++) {
+            if (METsPorPeriodo[i] > 1.5) {
+              actividadSedentaria = true;//cambiar a false para pruebas reales
+              break;
             }
-            enviarDatos(0, -1, actividadSedentaria); // Enviar la bandera de actividad sedentaria
-            // Reiniciar los METs acumulados para el próximo ciclo de 30 minutos
-            memset(METsPorPeriodo, 0, sizeof(METsPorPeriodo));
+          }
+          enviarDatos(0, -1, true); // Enviar la bandera de actividad sedentaria
+          // Reiniciar los METs acumulados para el próximo ciclo de 30 minutos
+          memset(METsPorPeriodo, 0, sizeof(METsPorPeriodo));
         }
         // Reiniciar el contador de METs para el nuevo periodo
         contadorMinutos = 0;
@@ -451,6 +458,46 @@ void enviarAlertaUsuario() {
 
 
 
+void enviarAceleracionesAThingsBoard() {
+    // Asegurarse de mantener la conexión MQTT activa
+    if (!client.connected()) {
+        reconnect();
+    }
+    client.loop();
+
+    // Leer datos del acelerómetro
+    accelerometer.getSensorData();
+    float aceleracionX = accelerometer.data.accelX;
+    float aceleracionY = accelerometer.data.accelY;
+    float aceleracionZ = accelerometer.data.accelZ;
+
+    // Mostrar datos en el Serial
+    Serial.print("Aceleracion X: ");
+    Serial.print(aceleracionX);
+    Serial.print(" Y: ");
+    Serial.print(aceleracionY);
+    Serial.print(" Z: ");
+    Serial.println(aceleracionZ);
+
+    // Crear el payload JSON
+    String payload = "{\"aceleracion_x\": ";
+    payload += aceleracionX;
+    payload += ", \"aceleracion_y\": ";
+    payload += aceleracionY;
+    payload += ", \"aceleracion_z\": ";
+    payload += aceleracionZ;
+    payload += "}";
+
+    // Enviar datos a ThingsBoard
+    if (client.publish(topic, (char*)payload.c_str())) {
+        Serial.println("Datos de aceleracion enviados a ThingsBoard.");
+    } else {
+        Serial.println("Error al enviar datos de aceleracion a ThingsBoard.");
+    }
+}
+
+
+
 
 void loop() {
   // Mantener la conexión MQTT
@@ -458,6 +505,8 @@ void loop() {
       reconnect();
   }
   client.loop();
+
+  enviarAceleracionesAThingsBoard();
   
   unsigned long currentMillis = millis();
   if (currentMillis - lastActivityTime >= interval) {
@@ -481,6 +530,6 @@ void loop() {
   //mira si el usuario quiere prender la pantalla
   manejarPantalla();
 
-  delay(1000);
+  delay(100);
   
 }
