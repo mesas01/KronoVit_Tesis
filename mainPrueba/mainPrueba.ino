@@ -7,9 +7,10 @@
 #include <Adafruit_GFX.h>
 #include <time.h>
 #include "esp_sleep.h"
+#include <algorithm>
 
 //---------------------------------WIFI-----------------------------------------------------------------------------------
-const char* ssid = "SM-DESKTOP"; //"SMN"; //"SLB";
+const char* ssid = "SMN"; //"SLB";
 const char* password = "12345678";//"speedemon";//"12345678";
 //------------------------------------THINGSBOARD--------------------------------------------------------------------------
 const char* mqtt_server = "demo.thingsboard.io";
@@ -36,6 +37,8 @@ const long interval = 60000; // Intervalo de tiempo (60 segundos o 60000 miliseg
 #define BATTERY_PIN 25 // Cambia esto por el pin correcto conectado a B_MON
 #define ADC_RESOLUTION 12 // Resolución del ADC de 12 bits
 #define ADC_ATTENUATION ADC_0db // Atenuación de 0 dB
+unsigned long lastBatteryCheck = 0;
+const unsigned long batteryInterval = 60000; // 60,000 ms = 1 minuto
 //---------------------------------RTC & DISPLAY-------------------------------------------------------------------------
 RTC_DS3231 rtc;
 #define TFT_CS     5
@@ -49,6 +52,18 @@ RTC_DS3231 rtc;
 bool pantallaEncendida = false;
 unsigned long tiempoPantallaEncendida = 0;
 const unsigned long tiempoEncendido = 15000; // 15 segundos en milisegundos
+//---------------------------nueva tasa de muestreo-------------------
+float sumX = 0, sumY = 0, sumZ = 0;
+int sampleCount = 0;
+const int samplesPerSecond = 200; // Ajusta este valor si cambias el ODR
+
+float enmoSum = 0;
+int enmoCount = 0;
+const int enmoInterval = 600; // 10 minutos * 60 segundos
+unsigned long lastSampleTime = 0; // Tiempo de la última muestra de aceleración
+const int sampleInterval = 5; // Intervalo de tiempo en ms para 200Hz de muestreo
+int ciclo = 0;
+//----------------------------
 
 
 Adafruit_GC9A01A tft = Adafruit_GC9A01A(TFT_CS, TFT_DC, TFT_RST);
@@ -57,7 +72,7 @@ Adafruit_GC9A01A tft = Adafruit_GC9A01A(TFT_CS, TFT_DC, TFT_RST);
 int contadorMinutos = 0;
 float METsPorPeriodo[3] = {0, 0, 0}; // Almacena los METs de cada periodo de 10 minutos
 int periodoActual = 0; // Indica el periodo actual de 10 minutos dentro de los 30 minutos
-bool actividadSedentaria = true;// Indica si en algún periodo se superó el umbral de 1.5 METs
+bool actividadSedentaria = false;// Indica si en algún periodo se superó el umbral de 1.5 METs
 bool banderaActividad = false; // Indica si en algún periodo se superó el umbral de 1.5 METs
 
 
@@ -65,6 +80,7 @@ bool banderaActividad = false; // Indica si en algún periodo se superó el umbr
 void setup() {
   Serial.begin(115200);
   Wire.begin();
+  Wire.setClock(400000); // Configura la velocidad de I2C a 400kHz
 
   //pruebas
   analogReadResolution(ADC_RESOLUTION);
@@ -91,11 +107,13 @@ void setup() {
   tft.setRotation(0);
   tft.fillScreen(GC9A01A_BLACK);
 
-  if (accelerometer.beginI2C(i2cAddress) != BMA400_OK) {
-    Serial.println("Error: BMA400 not connected, check wiring and I2C address!");
-    delay(1000);
-  }
-  Serial.println("BMA400 connected!");
+  if (accelerometer.beginI2C() == BMA400_OK) {
+        Serial.println("BMA400 conectado!");
+        accelerometer.setODR(BMA400_ODR_400HZ); // Ajusta aquí según sea necesario
+        accelerometer.setRange(BMA400_RANGE_2G); // Configura el rango de medición a ±2g
+    } else {
+        Serial.println("Error: BMA400 no se conecto");
+    }
 
   setup_wifi(); // Connect to WiFi and sync time
   client.setServer(mqtt_server, 1883);
@@ -158,53 +176,58 @@ void reconnect() {
 }
 
 
-//Funcion para enviar los datos
-
 // Función para enviar los datos
-void enviarDatos(float MET, int periodo, bool finalizarCiclo) {
-    DateTime now = rtc.now(); // Obtener la hora actual del RTC
-    String timestamp = String(now.year(), DEC) + "-" +
-                       String(now.month(), DEC) + "-" +
-                       String(now.day(), DEC) + " T-> " +
-                       String(now.hour(), DEC) + ":" +
-                       String(now.minute(), DEC) + ":" +
-                       String(now.second(), DEC);
+void enviarDatos(float METs, int ciclo) {
 
-    if (!finalizarCiclo) {
-        // Enviar MET de un periodo específico junto con la hora
-        String payload = "{\"METsPeriodo" + String(periodo + 1) + "\": " + String(MET, 2) + ", \"timestamp\": \"" + timestamp + "\"}";
-        if (client.publish(topic, (char*)payload.c_str())) {
-            Serial.println("Datos enviados exitosamente: " + payload);
-        } else {
-            Serial.println("Error al enviar datos");
-        }
-    } else {
-        // En el final del ciclo, evaluar si la actividad sedentaria es verdadera
-        if (actividadSedentaria) {
-            // Si es actividad sedentaria, enviar el MET como 1.4 y también el MET del periodo 3
-            String payloadSedentario = "{\"MET\": \"1.4\", \"timestamp\": \"" + timestamp + "\"}";
-            if (client.publish(topic, (char*)payloadSedentario.c_str())) {
-                Serial.println("Datos enviados exitosamente: " + payloadSedentario);
-            } else {
-                Serial.println("Error al enviar datos de actividad sedentaria");
-            }
-        }
+  float calcularBandera[3];
+  calcularBandera[ciclo-1] = METs;
+  int enviar = 0;
 
-        // Enviar siempre el MET del periodo 3 al finalizar el ciclo
-        String payloadPeriodo = "{\"METsPeriodo3\": " + String(METsPorPeriodo[2], 2) + ", \"timestamp\": \"" + timestamp + "\"}";
-        if (client.publish(topic, (char*)payloadPeriodo.c_str())) {
-            Serial.println("Datos enviados exitosamente: " + payloadPeriodo);
-        } else {
-            Serial.println("Error al enviar datos del periodo 3");
-        }
-        
-        // Resetear para el próximo ciclo de 30 minutos
-        for (int i = 0; i < 3; i++){
-          METsPorPeriodo[i] = 0;
-        } 
-        periodoActual = 0;
-        actividadSedentaria = true; // Resetear el estado de actividad sedentaria para el nuevo ciclo
+  DateTime now = rtc.now(); // Obtener la hora actual del RTC
+  String timestamp = String(now.year(), DEC) + "-" +
+                      String(now.month(), DEC) + "-" +
+                      String(now.day(), DEC) + " T-> " +
+                      String(now.hour(), DEC) + ":" +
+                      String(now.minute(), DEC) + ":" +
+                      String(now.second(), DEC);
+
+  String payload = "{\"METsPeriodo" + String(ciclo) + "\": " + String(METs, 3) + ", \"timestamp\": \"" + timestamp + "\"}";
+  if (client.publish(topic, (char*)payload.c_str())) {
+    Serial.println("Datos enviados exitosamente: " + payload);
+  } else {
+    Serial.println("Error al enviar datos");
+  }
+  
+  if (ciclo == 3) {
+    for(int i = 0; i < ciclo; i++){
+      if(calcularBandera[i] <=  1.5){
+        enviar++;
+        if(enviar == 3){
+          actividadSedentaria = true;
+          enviar=0;
+        }          
+      }
     }
+  }  
+
+  // En el final del ciclo, evaluar si la actividad sedentaria es verdadera
+  if (actividadSedentaria) {
+    // Si es actividad sedentaria, enviar el MET como 1.4 y también el MET del periodo 3
+    String payloadSedentario = "{\"MET\": \"1.4\", \"timestamp\": \"" + timestamp + "\"}";
+    if (client.publish(topic, (char*)payloadSedentario.c_str())) {
+      Serial.println("Datos sedentarios: " + payloadSedentario);
+      }else {
+        Serial.println("Error al enviar datos de actividad sedentaria");
+      }
+  }
+
+  // Enviar siempre el MET del periodo 3 al finalizar el ciclo
+  /*String payloadPeriodo = "{\"METsPeriodo3\": " + String(METs, 3) + ", \"timestamp\": \"" + timestamp + "\"}";
+  if (client.publish(topic, (char*)payloadPeriodo.c_str())) {
+    Serial.println("Datos enviados exitosamente: " + payloadPeriodo);
+  } else {
+    Serial.println("Error al enviar datos del periodo 3");
+  }*/
 }
 
 
@@ -218,10 +241,7 @@ float calculateBatteryPercentage(float voltage) {
 
 //Función para medir el nivel de la batería y enviarlo a ThingsBoard cada minuto
 void enviarNivelBateriaAThingsBoard() {
-  unsigned long currentMillis = millis();
   
-  if (currentMillis - lastBatteryReadMillis >= batteryReadInterval) {
-    lastBatteryReadMillis = currentMillis; // Actualiza la última vez que se leyó la batería
 
     // Configurar la resolución del ADC y la atenuación
     analogReadResolution(12); // 12 bits de resolución
@@ -255,7 +275,7 @@ void enviarNivelBateriaAThingsBoard() {
     } else {
       Serial.println("Error al enviar datos a ThingsBoard.");
     }
-  }
+  
 }
 
 // Función para mapear un float a otro rango
@@ -268,7 +288,7 @@ float mapf(float x, float in_min, float in_max, float out_min, float out_max) {
 
 
 //Funcion para medir y clasificar la actividad
-void medirYClasificarActividad() {
+/*void medirYClasificarActividad() {
     // Asegurarse de mantener la conexión MQTT
     if (!client.connected()) {
         reconnect();
@@ -313,7 +333,7 @@ void medirYClasificarActividad() {
         // Reiniciar el contador de METs para el nuevo periodo
         contadorMinutos = 0;
     }
-}
+}*/
 
 
 void mostrarFechaHora() {
@@ -498,38 +518,93 @@ void enviarAceleracionesAThingsBoard() {
 
 
 
+void collectAndAverageData() {
+  accelerometer.getSensorData();
+  sumX += accelerometer.data.accelX;
+  sumY += accelerometer.data.accelY;
+  sumZ += accelerometer.data.accelZ;
+  sampleCount++;
+
+  // Si se han recolectado 200 muestras, calcula el promedio
+  if (sampleCount >= samplesPerSecond) {
+    float avgX = sumX / sampleCount;
+    float avgY = sumY / sampleCount;
+    float avgZ = sumZ / sampleCount;
+
+    // Resetea contadores para el próximo segundo
+    sumX = 0; sumY = 0; sumZ = 0; sampleCount = 0;
+    calculateENMO(avgX, avgY, avgZ);
+
+    // Opcional: Envía las aceleraciones promediadas a ThingsBoard o realiza cálculos adicionales
+    Serial.printf("Promedio Aceleraciones: X: %f, Y: %f, Z: %f\n", avgX, avgY, avgZ);
+  }
+}
+
+
+void calculateENMO(float avgX, float avgY, float avgZ) {
+    float VM = sqrt(sq(avgX) + sq(avgY) + sq(avgZ));
+    float ENMO = VM - 1.0; // Asegurar que ENMO no sea negativo
+    if(ENMO < 0){
+      ENMO = 0;
+    }
+    enmoSum += ENMO;
+    enmoCount++;
+
+    // Cada 10 minutos, calcula y envía MET
+    if(enmoCount == enmoInterval) {
+        float avgENMO = enmoSum / enmoCount;
+        float METs = (0.032 * avgENMO + 7.28) / 3.5;
+        
+        ciclo++;
+        enviarDatos(METs, ciclo);
+
+        if(ciclo == 3){
+          ciclo = 0;
+        }
+
+        // Reset para el próximo ciclo
+        enmoSum = 0;
+        enmoCount = 0;
+    }
+}
+
 
 void loop() {
-  // Mantener la conexión MQTT
-  if (!client.connected()) {
+  static unsigned long lastCheck = 0; // Controla la última vez que se revisaron tareas no relacionadas con el muestreo
+
+  // Recolecta y promedia datos de aceleración cada 5ms hasta completar 200 muestras (cada segundo)
+  if (millis() - lastSampleTime >= sampleInterval) {
+    lastSampleTime = millis();
+    collectAndAverageData();
+  }
+
+  // Ejecutar tareas periódicas cada segundo
+  if (millis() - lastCheck >= 1000) {
+    lastCheck = millis();
+
+    // Mantener la conexión MQTT
+    if (!client.connected()) {
       reconnect();
-  }
-  client.loop();
+    }
+    client.loop();
 
-  enviarAceleracionesAThingsBoard();
+    // Mostrar la hora y el estado de conexión constantemente
+    mostrarFechaHora();
   
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastActivityTime >= interval) {
-    // Actualiza la última vez que se ejecutó la función
-    lastActivityTime = currentMillis;
-
-    // Ejecutar la función de medición y clasificación de actividad
-    medirYClasificarActividad();
   }
-    
 
-  // Mostrar la hora y el estado de conexión constantemente
-  mostrarFechaHora();
+  // Envía el nivel de batería a ThingsBoard cada minuto
+  if (millis() - lastBatteryCheck >= batteryInterval) {
+    lastBatteryCheck = millis();
+     enviarNivelBateriaAThingsBoard();
+  }
 
-  //calcula el nivel de bateria y lo manda a tb
-  enviarNivelBateriaAThingsBoard();
-
-  //mira si el usuario necesita mandar una alerta urgente
+  // Mira si el usuario necesita mandar una alerta urgente
   manejarAlertaBoton2();
 
-  //mira si el usuario quiere prender la pantalla
+  // Mira si el usuario quiere prender la pantalla
   manejarPantalla();
 
-  delay(100);
-  
+    // Evita usar delay en el loop principal; esto puede interferir con la recolección de datos y el manejo de la conexión MQTT
 }
+
